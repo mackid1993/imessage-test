@@ -63,6 +63,13 @@ func init() {
 var generalCaps = &bridgev2.NetworkGeneralCapabilities{
 	DisappearingMessages: false,
 	AggressiveUpdateInfo: true,
+	Provisioning: bridgev2.ProvisioningCapabilities{
+		ResolveIdentifier: bridgev2.ResolveIdentifierCapabilities{
+			CreateDM:    true,
+			LookupPhone: true,
+			LookupEmail: true,
+		},
+	},
 }
 
 func (c *IMConnector) GetCapabilities() *bridgev2.NetworkGeneralCapabilities {
