@@ -5,7 +5,7 @@ BINARY="$1"
 DATA_DIR="$2"
 BUNDLE_ID="$3"
 
-BRIDGE_NAME="${BRIDGE_NAME:-sh-imessage}"
+BRIDGE_NAME="${BRIDGE_NAME:-sh-rustpush}"
 
 BINARY="$(cd "$(dirname "$BINARY")" && pwd)/$(basename "$BINARY")"
 CONFIG="$DATA_DIR/config.yaml"

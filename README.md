@@ -2,7 +2,7 @@
 
 A Matrix-iMessage puppeting bridge. Send and receive iMessages from any Matrix client.
 
-This is the **v2** rewrite using [rustpush](https://github.com/OpenBubbles/rustpush) and [bridgev2](https://mau.fi/blog/megabridge-twilio/) — it connects directly to Apple's iMessage servers without SIP bypass, Barcelona, or relay servers.
+This is the **v2** rewrite using [rustpush](https://github.com/OpenBubbles/rustpush) and [bridgev2](https://docs.mau.fi/bridges/general/bridgev2.html) — it connects directly to Apple's iMessage servers without SIP bypass, Barcelona, or relay servers.
 
 **Features**: text, images, video, audio, files, reactions/tapbacks, edits, unsends, typing indicators, read receipts, group chats, SMS forwarding, and contact name resolution.
 
@@ -20,7 +20,15 @@ cd imessage
 make install-beeper
 ```
 
-The installer handles everything: Homebrew, dependencies, building, Beeper login, iMessage login, config, and LaunchAgent setup.
+The installer handles everything: Homebrew, dependencies, building, Beeper login, config, and LaunchAgent setup. Once running, DM `@sh-rustpushbot:beeper.local` in Beeper and send `login`.
+
+**Already have an iMessage bridge (e.g. BlueBubbles)?** Use a custom bridge name to run both side by side:
+
+```bash
+BRIDGE_NAME=sh-rustpush-v2 make install-beeper
+```
+
+This registers a separate bridge so it doesn't collide with the existing one. DM `@sh-rustpush-v2bot:beeper.local` instead.
 
 ### With a Self-Hosted Homeserver
 
@@ -30,7 +38,9 @@ cd imessage
 make install
 ```
 
-The installer auto-installs Homebrew and dependencies if needed, asks three questions (homeserver URL, domain, your Matrix ID), generates config files, handles iMessage login, and starts the bridge as a LaunchAgent. It will pause and tell you exactly what to add to your `homeserver.yaml` to register the bridge.
+The installer auto-installs Homebrew and dependencies if needed, asks three questions (homeserver URL, domain, your Matrix ID), generates config files, and starts the bridge as a LaunchAgent. It will pause and tell you exactly what to add to your `homeserver.yaml` to register the bridge.
+
+Once running, DM `@imessagebot:yourdomain` in your Matrix client and send `login`.
 
 ## Quick Start (Linux)
 
@@ -46,58 +56,27 @@ sudo apt install -y git make
 
 ### Step 1: Extract hardware key (one-time, on your Mac)
 
-**If the Mac has Go installed (macOS 13+):**
-
 ```bash
 git clone https://github.com/lrhodin/imessage.git
 cd imessage
 go run tools/extract-key/main.go
 ```
 
-**If the Mac is older (macOS 10.13 High Sierra through 12) or doesn't have Go:**
+This reads hardware identifiers (serial, MLB, ROM, etc.) and outputs a base64 key. The Mac is not modified.
 
-Cross-compile on any Mac that has Go, then copy the binary over:
-
-```bash
-# On your newer Mac (with Go installed):
-git clone https://github.com/lrhodin/imessage.git
-cd imessage
-make extract-key-intel
-
-# Copy to the older Mac:
-scp extract-key-intel user@old-mac:~/
-
-# On the older Mac:
-cd ~ && ./extract-key-intel
-```
-
-This reads hardware identifiers (serial, MLB, ROM, etc.) and outputs a base64 key. The Mac is not modified and can continue to be used normally.
-
-**Apple Silicon Macs** lack the encrypted IOKit properties needed by the x86_64 NAC emulator. You must also run the NAC relay — a small HTTP server that generates Apple validation data using the Mac's native `AAAbsintheContext` framework.
-
-**Set up the relay:**
+**Apple Silicon Macs** lack the encrypted IOKit properties needed by the x86_64 NAC emulator. You must also run the NAC relay:
 
 ```bash
-go build -o ~/bin/nac-relay ./tools/nac-relay/
-~/bin/nac-relay --setup
-```
+# Terminal 1: start the relay (keeps running)
+go run tools/nac-relay/main.go
 
-This installs a LaunchAgent that starts on login and auto-restarts if it crashes. On first run, grant **Full Disk Access** and **Contacts** access when prompted — this enables chat history backfill (including images and attachments), contact name resolution, and SMS forwarding from the Mac.
-
-```bash
-# Check it's running
-tail -f /tmp/nac-relay.log
-```
-
-**Extract the key with the relay URL:**
-
-```bash
+# Terminal 2: extract key with relay URL
 go run tools/extract-key/main.go -relay http://<your-mac-ip>:5001/validation-data
 ```
 
-The relay URL is embedded in the key. If the bridge runs outside your LAN (e.g., cloud VM), forward port 5001 TCP to your Mac's local IP. Lock the allowed source IPs to your bridge server for security.
+The relay URL is embedded in the key. If the bridge runs outside your LAN, forward port 5001 TCP to your Mac.
 
-**Intel Macs**: The NAC relay is not needed. The bridge runs the x86_64 NAC emulator locally on Linux using hardware data from the extracted key. Chat history starts from when you log in and contacts appear by phone number / email.
+**Intel Macs**: No NAC relay needed. The bridge runs the x86_64 NAC emulator locally on Linux.
 
 ### Step 2: Build and install the bridge (on Linux)
 

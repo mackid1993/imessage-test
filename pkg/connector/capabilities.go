@@ -14,7 +14,7 @@ import (
 )
 
 var caps = &event.RoomFeatures{
-	ID: "fi.mau.imessage.capabilities.2025_02",
+	ID: "fi.mau.rustpush.capabilities.2025_02",
 
 	Formatting: map[event.FormattingFeature]event.CapabilitySupportLevel{
 		event.FmtBold:   event.CapLevelDropped,
@@ -67,7 +67,7 @@ var capsDM *event.RoomFeatures
 func init() {
 	c := *caps
 	capsDM = &c
-	capsDM.ID = "fi.mau.imessage.capabilities.2025_02+dm"
+	capsDM.ID = "fi.mau.rustpush.capabilities.2025_02+dm"
 }
 
 var generalCaps = &bridgev2.NetworkGeneralCapabilities{
