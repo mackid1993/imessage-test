@@ -117,9 +117,8 @@ if ! grep -q "beeper" "$CONFIG" 2>/dev/null; then
     exit 1
 fi
 
-# ── Backfill window (first install only) ──────────────────────
-DB_PATH=$(grep 'uri:' "$CONFIG" | head -1 | sed 's/.*uri: file://' | sed 's/?.*//')
-if [ -t 0 ] && { [ -z "$DB_PATH" ] || [ ! -f "$DB_PATH" ]; }; then
+# ── Backfill window ──────────────────────────────────────────
+if [ -t 0 ]; then
     CURRENT_DAYS=$(grep 'initial_sync_days:' "$CONFIG" | head -1 | sed 's/.*initial_sync_days: *//')
     [ -z "$CURRENT_DAYS" ] && CURRENT_DAYS=365
     printf "How many days of message history to backfill? [%s]: " "$CURRENT_DAYS"
@@ -170,8 +169,49 @@ if [ "$NEEDS_LOGIN" = "false" ]; then
             fi
         fi
         if [ -n "$SAVED_HANDLE" ]; then
-            sed -i '' "s|preferred_handle: .*|preferred_handle: '$SAVED_HANDLE'|" "$CONFIG"
+            if grep -q 'preferred_handle:' "$CONFIG"; then
+                sed -i '' "s|preferred_handle: .*|preferred_handle: '$SAVED_HANDLE'|" "$CONFIG"
+            else
+                sed -i '' "/initial_sync_days:.*/a\\
+    preferred_handle: '$SAVED_HANDLE'" "$CONFIG"
+            fi
             echo "✓ Restored preferred handle: $SAVED_HANDLE"
+        elif [ -t 0 ]; then
+            # No saved handle found — prompt user to pick one
+            HANDLE_LIST=$("$BINARY" list-handles 2>/dev/null || true)
+            if [ -n "$HANDLE_LIST" ]; then
+                HANDLES=()
+                while IFS= read -r h; do
+                    HANDLES+=("$h")
+                done <<< "$HANDLE_LIST"
+                echo ""
+                echo "┌─────────────────────────────────────────────────┐"
+                echo "│  No preferred handle configured.                │"
+                echo "│  This controls your outgoing iMessage identity. │"
+                echo "└─────────────────────────────────────────────────┘"
+                echo ""
+                echo "Available handles:"
+                for i in "${!HANDLES[@]}"; do
+                    echo "  $((i + 1))) ${HANDLES[$i]}"
+                done
+                echo ""
+                printf "Select handle [1]: "
+                read CHOICE
+                CHOICE="${CHOICE:-1}"
+                IDX=$((CHOICE - 1))
+                if [ "$IDX" -ge 0 ] 2>/dev/null && [ "$IDX" -lt "${#HANDLES[@]}" ]; then
+                    CHOSEN_HANDLE="${HANDLES[$IDX]}"
+                else
+                    CHOSEN_HANDLE="${HANDLES[0]}"
+                fi
+                if grep -q 'preferred_handle:' "$CONFIG"; then
+                    sed -i '' "s|preferred_handle: .*|preferred_handle: '$CHOSEN_HANDLE'|" "$CONFIG"
+                else
+                    sed -i '' "/initial_sync_days:.*/a\\
+    preferred_handle: '$CHOSEN_HANDLE'" "$CONFIG"
+                fi
+                echo "✓ Preferred handle set to: $CHOSEN_HANDLE"
+            fi
         fi
     fi
 fi
@@ -188,6 +228,40 @@ if [ "$NEEDS_LOGIN" = "true" ] && [ -t 0 ]; then
     # Run login from the data directory so the keystore (state/keystore.plist)
     # is written to the same location the launchd service will read from.
     (cd "$DATA_DIR" && "$BINARY" login -c "$CONFIG")
+    echo ""
+    # After fresh login, prompt for preferred handle
+    HANDLE_LIST=$("$BINARY" list-handles 2>/dev/null || true)
+    if [ -n "$HANDLE_LIST" ]; then
+        HANDLES=()
+        while IFS= read -r h; do
+            HANDLES+=("$h")
+        done <<< "$HANDLE_LIST"
+        echo "┌─────────────────────────────────────────────────┐"
+        echo "│  Choose your outgoing iMessage identity.         │"
+        echo "└─────────────────────────────────────────────────┘"
+        echo ""
+        echo "Available handles:"
+        for i in "${!HANDLES[@]}"; do
+            echo "  $((i + 1))) ${HANDLES[$i]}"
+        done
+        echo ""
+        printf "Select handle [1]: "
+        read CHOICE
+        CHOICE="${CHOICE:-1}"
+        IDX=$((CHOICE - 1))
+        if [ "$IDX" -ge 0 ] 2>/dev/null && [ "$IDX" -lt "${#HANDLES[@]}" ]; then
+            CHOSEN_HANDLE="${HANDLES[$IDX]}"
+        else
+            CHOSEN_HANDLE="${HANDLES[0]}"
+        fi
+        if grep -q 'preferred_handle:' "$CONFIG"; then
+            sed -i '' "s|preferred_handle: .*|preferred_handle: '$CHOSEN_HANDLE'|" "$CONFIG"
+        else
+            sed -i '' "/initial_sync_days:.*/a\\
+    preferred_handle: '$CHOSEN_HANDLE'" "$CONFIG"
+        fi
+        echo "✓ Preferred handle set to: $CHOSEN_HANDLE"
+    fi
     echo ""
 elif [ "$NEEDS_LOGIN" = "true" ]; then
     echo ""
@@ -287,4 +361,6 @@ echo ""
 echo "Bridge is starting up (check logs for status):"
 echo "  tail -f $LOG_OUT"
 echo ""
-echo "Once running, DM @${BRIDGE_NAME}bot:$DOMAIN and send: login"
+if [ "$NEEDS_LOGIN" = "true" ]; then
+    echo "Once running, DM @${BRIDGE_NAME}bot:$DOMAIN and send: login"
+fi

@@ -1848,6 +1848,7 @@ type WrappedMessage struct {
 	ErrorStatusStr        *string
 	IsPeerCacheInvalidate bool
 	SendDelivered         bool
+	SenderGuid            *string
 }
 
 func (r *WrappedMessage) Destroy() {
@@ -1888,6 +1889,7 @@ func (r *WrappedMessage) Destroy() {
 	FfiDestroyerOptionalString{}.Destroy(r.ErrorStatusStr)
 	FfiDestroyerBool{}.Destroy(r.IsPeerCacheInvalidate)
 	FfiDestroyerBool{}.Destroy(r.SendDelivered)
+	FfiDestroyerOptionalString{}.Destroy(r.SenderGuid)
 }
 
 type FfiConverterTypeWrappedMessage struct{}
@@ -1937,6 +1939,7 @@ func (c FfiConverterTypeWrappedMessage) Read(reader io.Reader) WrappedMessage {
 		FfiConverterOptionalStringINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
 	}
 }
 
@@ -1982,6 +1985,7 @@ func (c FfiConverterTypeWrappedMessage) Write(writer io.Writer, value WrappedMes
 	FfiConverterOptionalStringINSTANCE.Write(writer, value.ErrorStatusStr)
 	FfiConverterBoolINSTANCE.Write(writer, value.IsPeerCacheInvalidate)
 	FfiConverterBoolINSTANCE.Write(writer, value.SendDelivered)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.SenderGuid)
 }
 
 type FfiDestroyerTypeWrappedMessage struct{}

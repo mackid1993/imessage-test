@@ -150,6 +150,22 @@ func runInteractiveLogin(br *mxmain.BridgeMain) {
 
 		switch step.Type {
 		case bridgev2.LoginStepTypeUserInput:
+			// Skip handle selection in CLI — the install script handles it
+			// and writes the choice to config.yaml.
+			if step.StepID == "fi.mau.imessage.login.select_handle" {
+				input := make(map[string]string)
+				for _, field := range step.UserInputParams.Fields {
+					if len(field.Options) > 0 {
+						input[field.ID] = field.Options[0]
+					}
+				}
+				step, err = userInput.SubmitUserInput(ctx, input)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[!] Login step failed: %v\n", err)
+					os.Exit(1)
+				}
+				break
+			}
 			input := make(map[string]string)
 			for _, field := range step.UserInputParams.Fields {
 				if strings.Contains(field.ID, "key") {

@@ -254,8 +254,11 @@ func (c *IMConnector) LoadUserLogin(ctx context.Context, login *bridgev2.UserLog
 		users:         rustpushgo.NewWrappedIdsUsers(usersStr),
 		identity:      rustpushgo.NewWrappedIdsngmIdentity(identityStr),
 		connection:    rustpushgo.Connect(cfg, rustpushgo.NewWrappedApsState(apsStateStr)),
-		recentUnsends: make(map[string]time.Time),
-		smsPortals:    make(map[string]bool),
+		recentUnsends:      make(map[string]time.Time),
+		smsPortals:         make(map[string]bool),
+		imGroupNames:       make(map[string]string),
+		imGroupGuids:       make(map[string]string),
+		lastGroupForMember: make(map[string]networkid.PortalKey),
 	}
 
 	login.Client = client

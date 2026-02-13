@@ -186,12 +186,17 @@ func (l *AppleIDLogin) finishLogin(ctx context.Context) (*bridgev2.LoginStep, er
 	l.result = &result
 
 	handles := result.Users.GetHandles()
+	// Restore preferred handle from cached session if still valid
+	if session != nil && session.PreferredHandle != "" {
+		for _, h := range handles {
+			if h == session.PreferredHandle {
+				l.handle = h
+				return l.completeLogin(ctx)
+			}
+		}
+	}
 	if step := handleSelectionStep(handles); step != nil {
 		return step, nil
-	}
-	// Single handle — skip selection
-	if len(handles) > 0 {
-		l.handle = handles[0]
 	}
 	return l.completeLogin(ctx)
 }
@@ -388,12 +393,17 @@ func (l *ExternalKeyLogin) finishLogin(ctx context.Context) (*bridgev2.LoginStep
 	l.result = &result
 
 	handles := result.Users.GetHandles()
+	// Restore preferred handle from cached session if still valid
+	if session != nil && session.PreferredHandle != "" {
+		for _, h := range handles {
+			if h == session.PreferredHandle {
+				l.handle = h
+				return l.completeLogin(ctx)
+			}
+		}
+	}
 	if step := handleSelectionStep(handles); step != nil {
 		return step, nil
-	}
-	// Single handle — skip selection
-	if len(handles) > 0 {
-		l.handle = handles[0]
 	}
 	return l.completeLogin(ctx)
 }
@@ -420,10 +430,11 @@ func (l *ExternalKeyLogin) completeLogin(ctx context.Context) (*bridgev2.LoginSt
 // They are validated as a group against the keystore before use, since they
 // reference each other's keys and are only useful together.
 type cachedSessionState struct {
-	IDSIdentity string
-	APSState    string
-	IDSUsers    string
-	source      string // "database" or "backup file", for logging
+	IDSIdentity     string
+	APSState        string
+	IDSUsers        string
+	PreferredHandle string
+	source          string // "database" or "backup file", for logging
 }
 
 // loadCachedSession looks up all three session components (identity, APS state,
@@ -437,10 +448,11 @@ func loadCachedSession(user *bridgev2.User, log zerolog.Logger) *cachedSessionSt
 			if meta.IDSUsers != "" || meta.IDSIdentity != "" || meta.APSState != "" {
 				log.Info().Msg("Found existing session state in database")
 				return &cachedSessionState{
-					IDSIdentity: meta.IDSIdentity,
-					APSState:    meta.APSState,
-					IDSUsers:    meta.IDSUsers,
-					source:      "database",
+					IDSIdentity:     meta.IDSIdentity,
+					APSState:        meta.APSState,
+					IDSUsers:        meta.IDSUsers,
+					PreferredHandle: meta.PreferredHandle,
+					source:          "database",
 				}
 			}
 		}
@@ -450,10 +462,11 @@ func loadCachedSession(user *bridgev2.User, log zerolog.Logger) *cachedSessionSt
 	if state.IDSIdentity != "" || state.APSState != "" || state.IDSUsers != "" {
 		log.Info().Msg("Found existing session state in backup file")
 		return &cachedSessionState{
-			IDSIdentity: state.IDSIdentity,
-			APSState:    state.APSState,
-			IDSUsers:    state.IDSUsers,
-			source:      "backup file",
+			IDSIdentity:     state.IDSIdentity,
+			APSState:        state.APSState,
+			IDSUsers:        state.IDSUsers,
+			PreferredHandle: state.PreferredHandle,
+			source:          "backup file",
 		}
 	}
 	return nil
@@ -518,9 +531,10 @@ func getExistingUsers(session *cachedSessionState, log zerolog.Logger) *rustpush
 // ============================================================================
 
 // handleSelectionStep returns a login step prompting the user to pick a handle,
-// or nil if there are fewer than 2 handles (no choice needed).
+// or nil if there are no handles. Always prompts (even with 1 handle) so the
+// preferred handle is explicitly chosen and persisted.
 func handleSelectionStep(handles []string) *bridgev2.LoginStep {
-	if len(handles) < 2 {
+	if len(handles) == 0 {
 		return nil
 	}
 	return &bridgev2.LoginStep{
@@ -568,8 +582,11 @@ func completeLoginWithMeta(
 		users:         result.Users,
 		identity:      result.Identity,
 		connection:    conn,
-		recentUnsends: make(map[string]time.Time),
-		smsPortals:    make(map[string]bool),
+		recentUnsends:      make(map[string]time.Time),
+		smsPortals:         make(map[string]bool),
+		imGroupNames:       make(map[string]string),
+		imGroupGuids:       make(map[string]string),
+		lastGroupForMember: make(map[string]networkid.PortalKey),
 	}
 
 	loginID := networkid.UserLoginID(result.Users.LoginId(0))

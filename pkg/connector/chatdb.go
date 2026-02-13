@@ -9,11 +9,19 @@
 package connector
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"image"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"image/jpeg"
+
+	_ "image/gif"
+	_ "image/png"
 
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
@@ -61,8 +69,11 @@ func (db *chatDB) findGroupChatGUID(portalID string, c *IMClient) string {
 	portalMembers := strings.Split(portalID, ",")
 	portalMemberSet := make(map[string]struct{})
 	for _, m := range portalMembers {
-		// Strip prefix and normalize to lowercase
-		portalMemberSet[strings.ToLower(stripIdentifierPrefix(m))] = struct{}{}
+		local := strings.ToLower(stripIdentifierPrefix(m))
+		if n := normalizePhoneIdentifierForPortalID(local); n != "" {
+			local = n
+		}
+		portalMemberSet[local] = struct{}{}
 	}
 
 	// Search group chats within the configured sync window
@@ -84,9 +95,17 @@ func (db *chatDB) findGroupChatGUID(portalID string, c *IMClient) string {
 
 		// Build member set from chat.db (add self, lowercase for case-insensitive matching)
 		chatMemberSet := make(map[string]struct{})
-		chatMemberSet[strings.ToLower(stripIdentifierPrefix(c.handle))] = struct{}{}
+		handleLocal := strings.ToLower(stripIdentifierPrefix(c.handle))
+		if n := normalizePhoneIdentifierForPortalID(handleLocal); n != "" {
+			handleLocal = n
+		}
+		chatMemberSet[handleLocal] = struct{}{}
 		for _, m := range info.Members {
-			chatMemberSet[strings.ToLower(stripIdentifierPrefix(m))] = struct{}{}
+			local := strings.ToLower(stripIdentifierPrefix(m))
+			if n := normalizePhoneIdentifierForPortalID(local); n != "" {
+				local = n
+			}
+			chatMemberSet[local] = struct{}{}
 		}
 
 		// Check if members match
@@ -390,12 +409,41 @@ func convertChatDBAttachment(ctx context.Context, portal *bridgev2.Portal, inten
 		data, mimeType, fileName, durationMs = convertAudioForMatrix(data, mimeType, fileName)
 	}
 
+	// Process images: extract dimensions, convert non-JPEG to JPEG, generate thumbnail
+	var imgWidth, imgHeight int
+	var thumbData []byte
+	var thumbW, thumbH int
+	if strings.HasPrefix(mimeType, "image/") || looksLikeImage(data) {
+		if mimeType == "image/gif" {
+			cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+			if err == nil {
+				imgWidth, imgHeight = cfg.Width, cfg.Height
+			}
+		} else if img, _, isJPEG := decodeImageData(data); img != nil {
+			b := img.Bounds()
+			imgWidth, imgHeight = b.Dx(), b.Dy()
+			if !isJPEG {
+				var buf bytes.Buffer
+				if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 95}); err == nil {
+					data = buf.Bytes()
+					mimeType = "image/jpeg"
+					fileName = strings.TrimSuffix(fileName, filepath.Ext(fileName)) + ".jpg"
+				}
+			}
+			if imgWidth > 800 || imgHeight > 800 {
+				thumbData, thumbW, thumbH = scaleAndEncodeThumb(img, imgWidth, imgHeight)
+			}
+		}
+	}
+
 	content := &event.MessageEventContent{
 		MsgType: mimeToMsgType(mimeType),
 		Body:    fileName,
 		Info: &event.FileInfo{
 			MimeType: mimeType,
 			Size:     len(data),
+			Width:    imgWidth,
+			Height:   imgHeight,
 		},
 	}
 
@@ -416,6 +464,26 @@ func convertChatDBAttachment(ctx context.Context, portal *bridgev2.Portal, inten
 			content.File = encFile
 		} else {
 			content.URL = url
+		}
+
+		// Upload image thumbnail
+		if thumbData != nil {
+			thumbURL, thumbEnc, err := intent.UploadMedia(ctx, "", thumbData, "thumbnail.jpg", "image/jpeg")
+			if err == nil {
+				if thumbEnc != nil {
+					content.Info.ThumbnailFile = thumbEnc
+				} else {
+					content.Info.ThumbnailURL = thumbURL
+				}
+				content.Info.ThumbnailInfo = &event.FileInfo{
+					MimeType: "image/jpeg",
+					Size:     len(thumbData),
+					Width:    thumbW,
+					Height:   thumbH,
+				}
+			} else {
+				zerolog.Ctx(ctx).Warn().Err(err).Msg("Failed to upload image thumbnail")
+			}
 		}
 	}
 

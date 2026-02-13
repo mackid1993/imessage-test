@@ -236,6 +236,9 @@ pub struct WrappedMessage {
 
     // Send delivered flag
     pub send_delivered: bool,
+
+    // Group chat UUID (persistent identifier for the group conversation)
+    pub sender_guid: Option<String>,
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -337,6 +340,7 @@ fn message_inst_to_wrapped(msg: &MessageInst) -> WrappedMessage {
         error_status_str: None,
         is_peer_cache_invalidate: false,
         send_delivered: msg.send_delivered,
+        sender_guid: conv.and_then(|c| c.sender_guid.clone()),
     };
 
     match &msg.message {

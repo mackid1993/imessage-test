@@ -160,3 +160,16 @@ func CheckSessionRestore() bool {
 	}
 	return session.validate(log)
 }
+
+// ListHandles returns the available iMessage handles from the saved session
+// state (session.json). Returns nil if no session is found.
+func ListHandles() []string {
+	rustpushgo.InitLogger()
+
+	state := loadSessionState(zerolog.Nop())
+	if state.IDSUsers == "" {
+		return nil
+	}
+	users := rustpushgo.NewWrappedIdsUsers(&state.IDSUsers)
+	return users.GetHandles()
+}

@@ -61,6 +61,16 @@ func main() {
 				fmt.Fprintln(os.Stderr, "[-] No valid backup session state — login required")
 				os.Exit(1)
 			}
+		case "list-handles":
+			// Print available iMessage handles, one per line.
+			handles := connector.ListHandles()
+			if len(handles) == 0 {
+				os.Exit(1)
+			}
+			for _, h := range handles {
+				fmt.Println(h)
+			}
+			os.Exit(0)
 		}
 	}
 

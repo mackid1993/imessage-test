@@ -1,16 +1,24 @@
 package connector
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
 	"io"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"image/jpeg"
+
+	_ "image/gif"
+	_ "image/png"
 
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/ptr"
@@ -289,7 +297,7 @@ func (br *backfillRelay) findGroupChatGUID(portalID string, c *IMClient) string 
 	portalMembers := strings.Split(portalID, ",")
 	portalMemberSet := make(map[string]struct{})
 	for _, m := range portalMembers {
-		portalMemberSet[strings.ToLower(stripIdentifierPrefix(m))] = struct{}{}
+		portalMemberSet[m] = struct{}{}
 	}
 
 	days := c.Main.Config.GetInitialSyncDays()
@@ -303,15 +311,23 @@ func (br *backfillRelay) findGroupChatGUID(portalID string, c *IMClient) string 
 		if !parsed.IsGroup {
 			continue
 		}
-		chatMemberSet := make(map[string]struct{})
-		chatMemberSet[strings.ToLower(stripIdentifierPrefix(c.handle))] = struct{}{}
+		// Build member set using the same logic as portal ID construction:
+		// filter own handles, normalize, add back canonical self-identifier.
+		chatMembers := make(map[string]struct{})
 		for _, m := range chat.Members {
-			chatMemberSet[strings.ToLower(stripIdentifierPrefix(m))] = struct{}{}
+			normalized := normalizeIdentifierForPortalID(addIdentifierPrefix(m))
+			if normalized == "" || c.isMyHandle(normalized) {
+				continue
+			}
+			chatMembers[normalized] = struct{}{}
 		}
-		if len(chatMemberSet) == len(portalMemberSet) {
+		chatMembers[normalizeIdentifierForPortalID(c.handle)] = struct{}{}
+
+		// Exact match
+		if len(chatMembers) == len(portalMemberSet) {
 			match := true
 			for m := range portalMemberSet {
-				if _, ok := chatMemberSet[m]; !ok {
+				if _, ok := chatMembers[m]; !ok {
 					match = false
 					break
 				}
@@ -319,6 +335,18 @@ func (br *backfillRelay) findGroupChatGUID(portalID string, c *IMClient) string 
 			if match {
 				return chat.ChatGUID
 			}
+		}
+
+		// Fuzzy match: tolerate ±1 member difference
+		shared := 0
+		for m := range portalMemberSet {
+			if _, ok := chatMembers[m]; ok {
+				shared++
+			}
+		}
+		diff := (len(portalMemberSet) - shared) + (len(chatMembers) - shared)
+		if diff <= 1 {
+			return chat.ChatGUID
 		}
 	}
 	return ""
@@ -353,18 +381,36 @@ func (c *IMClient) runInitialSyncViaRelay(ctx context.Context, log zerolog.Logge
 
 		var portalKey networkid.PortalKey
 		if parsed.IsGroup {
-			members := []string{c.handle}
+			// Build member list matching makePortalKey logic: filter out own
+			// handles, normalize, add back one canonical self-identifier.
+			members := make([]string, 0, len(chat.Members)+1)
 			for _, m := range chat.Members {
-				members = append(members, addIdentifierPrefix(m))
+				normalized := normalizeIdentifierForPortalID(addIdentifierPrefix(m))
+				if normalized == "" || c.isMyHandle(normalized) {
+					continue
+				}
+				members = append(members, normalized)
 			}
+			if len(members) == 0 {
+				continue // skip groups with no other members
+			}
+			members = append(members, normalizeIdentifierForPortalID(c.handle))
 			sort.Strings(members)
+			computedID := strings.Join(members, ",")
+			portalID := c.resolveExistingGroupPortalID(computedID, nil)
 			portalKey = networkid.PortalKey{
-				ID:       networkid.PortalID(strings.Join(members, ",")),
+				ID:       portalID,
 				Receiver: c.UserLogin.ID,
 			}
 		} else {
+			normalized := normalizeIdentifierForPortalID(addIdentifierPrefix(parsed.LocalID))
+			if normalized == "" {
+				continue // skip DMs with invalid identifier
+			}
+			portalID := c.resolveContactPortalID(normalized)
+			portalID = c.resolveExistingDMPortalID(string(portalID))
 			portalKey = networkid.PortalKey{
-				ID:       identifierToPortalID(parsed),
+				ID:       portalID,
 				Receiver: c.UserLogin.ID,
 			}
 		}
@@ -428,6 +474,33 @@ func (c *IMClient) runInitialSyncViaRelay(ctx context.Context, log zerolog.Logge
 			}
 			log.Info().Int("before", len(entries)).Int("after", len(merged)).Msg("Deduplicated DM entries by contact")
 			entries = merged
+		}
+	}
+
+	// Deduplicate group entries: the relay may return multiple chat GUIDs for
+	// the same group (e.g., iMessage and SMS variants). Keep the first (most
+	// recently active) and skip the rest.
+	{
+		seen := make(map[networkid.PortalID]bool)
+		var deduped []chatEntry
+		for _, entry := range entries {
+			if !strings.Contains(string(entry.portalKey.ID), ",") {
+				deduped = append(deduped, entry) // DMs already deduped above
+				continue
+			}
+			if seen[entry.portalKey.ID] {
+				log.Info().
+					Str("portal_id", string(entry.portalKey.ID)).
+					Str("chat_guid", entry.chatGUID).
+					Msg("Skipping duplicate group entry")
+				continue
+			}
+			seen[entry.portalKey.ID] = true
+			deduped = append(deduped, entry)
+		}
+		if len(deduped) < len(entries) {
+			log.Info().Int("before", len(entries)).Int("after", len(deduped)).Msg("Deduplicated group entries")
+			entries = deduped
 		}
 	}
 
@@ -608,12 +681,41 @@ func (br *backfillRelay) convertRelayAttachment(ctx context.Context, intent brid
 		data, mimeType, fileName, durationMs = convertAudioForMatrix(data, mimeType, fileName)
 	}
 
+	// Process images: extract dimensions, convert non-JPEG to JPEG, generate thumbnail
+	var imgWidth, imgHeight int
+	var thumbData []byte
+	var thumbW, thumbH int
+	if strings.HasPrefix(mimeType, "image/") || looksLikeImage(data) {
+		if mimeType == "image/gif" {
+			cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+			if err == nil {
+				imgWidth, imgHeight = cfg.Width, cfg.Height
+			}
+		} else if img, _, isJPEG := decodeImageData(data); img != nil {
+			b := img.Bounds()
+			imgWidth, imgHeight = b.Dx(), b.Dy()
+			if !isJPEG {
+				var buf bytes.Buffer
+				if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 95}); err == nil {
+					data = buf.Bytes()
+					mimeType = "image/jpeg"
+					fileName = strings.TrimSuffix(fileName, filepath.Ext(fileName)) + ".jpg"
+				}
+			}
+			if imgWidth > 800 || imgHeight > 800 {
+				thumbData, thumbW, thumbH = scaleAndEncodeThumb(img, imgWidth, imgHeight)
+			}
+		}
+	}
+
 	content := &event.MessageEventContent{
 		MsgType: mimeToMsgType(mimeType),
 		Body:    fileName,
 		Info: &event.FileInfo{
 			MimeType: mimeType,
 			Size:     len(data),
+			Width:    imgWidth,
+			Height:   imgHeight,
 		},
 	}
 
@@ -634,6 +736,26 @@ func (br *backfillRelay) convertRelayAttachment(ctx context.Context, intent brid
 			content.File = encFile
 		} else {
 			content.URL = url
+		}
+
+		// Upload image thumbnail
+		if thumbData != nil {
+			thumbURL, thumbEnc, err := intent.UploadMedia(ctx, "", thumbData, "thumbnail.jpg", "image/jpeg")
+			if err == nil {
+				if thumbEnc != nil {
+					content.Info.ThumbnailFile = thumbEnc
+				} else {
+					content.Info.ThumbnailURL = thumbURL
+				}
+				content.Info.ThumbnailInfo = &event.FileInfo{
+					MimeType: "image/jpeg",
+					Size:     len(thumbData),
+					Width:    thumbW,
+					Height:   thumbH,
+				}
+			} else {
+				zerolog.Ctx(ctx).Warn().Err(err).Msg("Failed to upload image thumbnail")
+			}
 		}
 	}
 
