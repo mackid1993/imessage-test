@@ -129,6 +129,70 @@ fi
 
 # (initial_sync_days is unused — cloud sync fetches all available history)
 
+# ── Contact source (first run only) ──────────────────────────
+if [ -t 0 ] && ! grep -q 'password_encrypted:' "$CONFIG" 2>/dev/null; then
+    # Config was just generated or doesn't have CardDAV yet — offer setup
+    echo ""
+    echo "Contact source (for resolving names in chats):"
+    echo "  1) iCloud (default — uses your Apple ID)"
+    echo "  2) External CardDAV (Google, Nextcloud, Fastmail, etc.)"
+    read -p "Choice [1]: " CONTACT_CHOICE
+    CONTACT_CHOICE="${CONTACT_CHOICE:-1}"
+
+    if [ "$CONTACT_CHOICE" = "2" ]; then
+        read -p "CardDAV email: " CARDDAV_EMAIL
+        if [ -z "$CARDDAV_EMAIL" ]; then
+            echo "ERROR: Email is required for CardDAV." >&2
+            exit 1
+        fi
+        read -p "CardDAV username (leave empty to use email): " CARDDAV_USERNAME
+        read -s -p "CardDAV app password: " CARDDAV_PASSWORD
+        echo ""
+        if [ -z "$CARDDAV_PASSWORD" ]; then
+            echo "ERROR: Password is required for CardDAV." >&2
+            exit 1
+        fi
+
+        CARDDAV_ARGS="--email $CARDDAV_EMAIL --password $CARDDAV_PASSWORD"
+        if [ -n "$CARDDAV_USERNAME" ]; then
+            CARDDAV_ARGS="$CARDDAV_ARGS --username $CARDDAV_USERNAME"
+        fi
+        CARDDAV_JSON=$("$BINARY" carddav-setup $CARDDAV_ARGS 2>/dev/null) || {
+            echo ""
+            echo "⚠  CardDAV setup failed. You can configure it manually in $CONFIG"
+            CARDDAV_JSON=""
+        }
+        if [ -n "$CARDDAV_JSON" ]; then
+            CARDDAV_URL=$(echo "$CARDDAV_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['url'])")
+            CARDDAV_ENC=$(echo "$CARDDAV_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['password_encrypted'])")
+            EFFECTIVE_USERNAME="${CARDDAV_USERNAME:-$CARDDAV_EMAIL}"
+            # Append carddav section if missing, then patch values
+            python3 -c "
+import re
+text = open('$CONFIG').read()
+if 'carddav:' not in text:
+    # Find the network section and append carddav under it
+    # bbctl configs put network settings under 'network:' key
+    text += '''
+    carddav:
+        email: \"\"
+        url: \"\"
+        username: \"\"
+        password_encrypted: \"\"
+'''
+def patch(text, key, val):
+    return re.sub(r'^(\s+' + re.escape(key) + r'\s*:)\s*.*$', r'\1 ' + val, text, count=1, flags=re.MULTILINE)
+text = patch(text, 'email', '\"$CARDDAV_EMAIL\"')
+text = patch(text, 'url', '\"$CARDDAV_URL\"')
+text = patch(text, 'username', '\"$EFFECTIVE_USERNAME\"')
+text = patch(text, 'password_encrypted', '\"$CARDDAV_ENC\"')
+open('$CONFIG', 'w').write(text)
+"
+            echo "✓ CardDAV configured: $CARDDAV_EMAIL → $CARDDAV_URL"
+        fi
+    fi
+fi
+
 # ── Check for existing login / prompt if needed ──────────────
 DB_URI=$(grep 'uri:' "$CONFIG" | head -1 | sed 's/.*uri: file://' | sed 's/?.*//')
 NEEDS_LOGIN=false
