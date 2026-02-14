@@ -126,6 +126,7 @@ var _ bridgev2.ReadReceiptHandlingNetworkAPI = (*IMClient)(nil)
 var _ bridgev2.TypingHandlingNetworkAPI = (*IMClient)(nil)
 var _ bridgev2.IdentifierResolvingNetworkAPI = (*IMClient)(nil)
 var _ bridgev2.BackfillingNetworkAPI = (*IMClient)(nil)
+var _ bridgev2.DeleteChatHandlingNetworkAPI = (*IMClient)(nil)
 var _ rustpushgo.MessageCallback = (*IMClient)(nil)
 var _ rustpushgo.UpdateUsersCallback = (*IMClient)(nil)
 
@@ -405,6 +406,10 @@ func (c *IMClient) OnMessage(msg rustpushgo.WrappedMessage) {
 	}
 	if msg.IsPeerCacheInvalidate {
 		log.Debug().Msg("Peer cache invalidated")
+		return
+	}
+	if msg.IsMoveToRecycleBin || msg.IsPermanentDelete {
+		c.handleChatDelete(log, msg)
 		return
 	}
 	if msg.IsTapback {
@@ -752,6 +757,53 @@ func (c *IMClient) handleParticipantChange(log zerolog.Logger, msg rustpushgo.Wr
 				MemberMap: memberMap,
 			},
 		},
+	})
+}
+
+func (c *IMClient) handleChatDelete(log zerolog.Logger, msg rustpushgo.WrappedMessage) {
+	deleteType := "MoveToRecycleBin"
+	if msg.IsPermanentDelete {
+		deleteType = "PermanentDelete"
+	}
+
+	// Message-level deletes (not chat deletes) — log and ignore for now.
+	if len(msg.DeleteMessageUuids) > 0 {
+		log.Debug().
+			Str("delete_type", deleteType).
+			Strs("message_uuids", msg.DeleteMessageUuids).
+			Msg("Ignoring message-level delete (not a chat delete)")
+		return
+	}
+
+	// Chat-level delete: resolve portal key from the delete target.
+	participants := msg.DeleteChatParticipants
+	if len(participants) == 0 {
+		// Fallback to conversation participants if delete target has none
+		participants = msg.Participants
+	}
+	if len(participants) == 0 {
+		log.Warn().Str("delete_type", deleteType).Msg("Cannot resolve portal for chat delete: no participants")
+		return
+	}
+
+	portalKey := c.makePortalKey(participants, msg.GroupName, msg.Sender, msg.DeleteChatGroupId)
+
+	log.Info().
+		Str("delete_type", deleteType).
+		Str("portal_id", string(portalKey.ID)).
+		Strs("participants", participants).
+		Msg("Received remote chat delete, queueing portal deletion")
+
+	c.Main.Bridge.QueueRemoteEvent(c.UserLogin, &simplevent.ChatDelete{
+		EventMeta: simplevent.EventMeta{
+			Type:      bridgev2.RemoteEventChatDelete,
+			PortalKey: portalKey,
+			Timestamp: time.UnixMilli(int64(msg.TimestampMs)),
+			LogContext: func(lc zerolog.Context) zerolog.Context {
+				return lc.Str("delete_type", deleteType).Str("msg_uuid", msg.Uuid)
+			},
+		},
+		OnlyForMe: true,
 	})
 }
 
@@ -1278,6 +1330,51 @@ func (c *IMClient) HandleMatrixReactionRemove(ctx context.Context, msg *bridgev2
 	reaction, emoji := emojiToTapbackType(msg.TargetReaction.Emoji)
 	_, err := c.client.SendTapback(conv, string(msg.TargetReaction.MessageID), 0, reaction, emoji, true, c.handle)
 	return err
+}
+
+// HandleMatrixDeleteChat is called when the user deletes a chat in Matrix/Beeper.
+// It sends a MoveToRecycleBin message via APNs (notifies other Apple devices)
+// and deletes the chat record from CloudKit (prevents reappearing during future syncs).
+func (c *IMClient) HandleMatrixDeleteChat(ctx context.Context, msg *bridgev2.MatrixDeleteChat) error {
+	if c.client == nil {
+		return bridgev2.ErrNotLoggedIn
+	}
+
+	log := zerolog.Ctx(ctx)
+	portalID := string(msg.Portal.ID)
+
+	conv := c.portalToConversation(msg.Portal)
+
+	// Build the chat GUID for the delete target.
+	// For DMs, Apple uses "iMessage;-;<identifier>" format.
+	// For groups with sender_guid, use that as the GUID.
+	chatGuid := portalID
+	if conv.SenderGuid != nil && *conv.SenderGuid != "" {
+		chatGuid = *conv.SenderGuid
+	}
+
+	// Send MoveToRecycleBin via APNs to notify other Apple devices.
+	if err := c.client.SendMoveToRecycleBin(conv, c.handle, chatGuid); err != nil {
+		log.Warn().Err(err).Str("portal_id", portalID).Msg("Failed to send MoveToRecycleBin via APNs")
+		// Don't return — still try CloudKit delete
+	} else {
+		log.Info().Str("portal_id", portalID).Msg("Sent MoveToRecycleBin via APNs")
+	}
+
+	// Delete from CloudKit so the chat doesn't reappear during future syncs.
+	if c.cloudStore != nil {
+		// Look up the CloudKit chat record ID for this portal
+		cloudChatID, err := c.cloudStore.getCloudChatIDByPortalID(ctx, portalID)
+		if err == nil && cloudChatID != "" {
+			if err := c.client.DeleteCloudChats([]string{cloudChatID}); err != nil {
+				log.Warn().Err(err).Str("cloud_chat_id", cloudChatID).Msg("Failed to delete chat from CloudKit")
+			} else {
+				log.Info().Str("cloud_chat_id", cloudChatID).Msg("Deleted chat from CloudKit")
+			}
+		}
+	}
+
+	return nil
 }
 
 // ============================================================================

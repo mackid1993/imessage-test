@@ -12,11 +12,12 @@ use keystore::{init_keystore, keystore, software::{NoEncryptor, SoftwareKeystore
 use log::{debug, error, info, warn};
 use rustpush::{
     authenticate_apple, login_apple_delegates, register, APSConnectionResource,
-    APSState, Attachment, AttachmentType, ConversationData, EditMessage, IDSNGMIdentity,
-    IDSUser, IMClient, LoginDelegate, MADRID_SERVICE, MMCSFile, Message, MessageInst, MessagePart,
-    MessageParts, MessageType, NormalMessage, OSConfig, ReactMessage, ReactMessageType,
-    Reaction, UnsendMessage, IndexedMessagePart, LinkMeta,
-    LPLinkMetadata, RichLinkImageAttachmentSubstitute, NSURL, TokenProvider,
+    APSState, Attachment, AttachmentType, ConversationData, DeleteTarget, EditMessage,
+    IDSNGMIdentity, IDSUser, IMClient, LoginDelegate, MADRID_SERVICE, MMCSFile, Message,
+    MessageInst, MessagePart, MessageParts, MessageType, MoveToRecycleBinMessage, NormalMessage,
+    OperatedChat, OSConfig, ReactMessage, ReactMessageType, Reaction, UnsendMessage,
+    IndexedMessagePart, LinkMeta, LPLinkMetadata, RichLinkImageAttachmentSubstitute, NSURL,
+    TokenProvider,
     util::{base64_decode, encode_hex},
 };
 use omnisette::default_provider;
@@ -880,6 +881,14 @@ pub struct WrappedMessage {
 
     // Group chat UUID (persistent identifier for the group conversation)
     pub sender_guid: Option<String>,
+
+    // Delete (MoveToRecycleBin / PermanentDelete)
+    pub is_move_to_recycle_bin: bool,
+    pub is_permanent_delete: bool,
+    pub delete_chat_participants: Vec<String>,
+    pub delete_chat_group_id: Option<String>,
+    pub delete_chat_guid: Option<String>,
+    pub delete_message_uuids: Vec<String>,
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -1106,6 +1115,27 @@ fn convert_reaction(reaction: &Reaction, enable: bool) -> (Option<u32>, Option<S
     (tapback_type, emoji, !enable)
 }
 
+fn populate_delete_target(w: &mut WrappedMessage, target: &DeleteTarget) {
+    match target {
+        DeleteTarget::Chat(chat) => {
+            w.delete_chat_participants = chat.participants.clone();
+            w.delete_chat_group_id = if chat.group_id.is_empty() {
+                None
+            } else {
+                Some(chat.group_id.clone())
+            };
+            w.delete_chat_guid = if chat.guid.is_empty() {
+                None
+            } else {
+                Some(chat.guid.clone())
+            };
+        }
+        DeleteTarget::Messages(uuids) => {
+            w.delete_message_uuids = uuids.clone();
+        }
+    }
+}
+
 fn message_inst_to_wrapped(msg: &MessageInst) -> WrappedMessage {
     let conv = msg.conversation.as_ref();
 
@@ -1148,6 +1178,12 @@ fn message_inst_to_wrapped(msg: &MessageInst) -> WrappedMessage {
         is_peer_cache_invalidate: false,
         send_delivered: msg.send_delivered,
         sender_guid: conv.and_then(|c| c.sender_guid.clone()),
+        is_move_to_recycle_bin: false,
+        is_permanent_delete: false,
+        delete_chat_participants: vec![],
+        delete_chat_group_id: None,
+        delete_chat_guid: None,
+        delete_message_uuids: vec![],
     };
 
     match &msg.message {
@@ -1282,6 +1318,14 @@ fn message_inst_to_wrapped(msg: &MessageInst) -> WrappedMessage {
         }
         Message::PeerCacheInvalidate => {
             w.is_peer_cache_invalidate = true;
+        }
+        Message::MoveToRecycleBin(del) => {
+            w.is_move_to_recycle_bin = true;
+            populate_delete_target(&mut w, &del.target);
+        }
+        Message::PermanentDelete(del) => {
+            w.is_permanent_delete = true;
+            populate_delete_target(&mut w, &del.target);
         }
         _ => {}
     }
@@ -2412,6 +2456,45 @@ impl Client {
         self.client.send(&mut msg).await
             .map_err(|e| WrappedError::GenericError { msg: format!("Failed to send unsend: {}", e) })?;
         Ok(msg.id.clone())
+    }
+
+    /// Send a MoveToRecycleBin message to notify other Apple devices that a chat was deleted.
+    pub async fn send_move_to_recycle_bin(
+        &self,
+        conversation: WrappedConversation,
+        handle: String,
+        chat_guid: String,
+    ) -> Result<(), WrappedError> {
+        let conv: ConversationData = (&conversation).into();
+        let operated_chat = OperatedChat {
+            participants: conv.participants.clone(),
+            group_id: conv.sender_guid.clone().unwrap_or_default(),
+            guid: chat_guid,
+            delete_incoming_messages: None,
+            was_reported_as_junk: None,
+        };
+        let delete_msg = MoveToRecycleBinMessage {
+            target: DeleteTarget::Chat(operated_chat),
+            recoverable_delete_date: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        };
+        let mut msg = MessageInst::new(conv, &handle, Message::MoveToRecycleBin(delete_msg));
+        self.client.send(&mut msg).await
+            .map_err(|e| WrappedError::GenericError { msg: format!("Failed to send MoveToRecycleBin: {}", e) })?;
+        Ok(())
+    }
+
+    /// Delete chat records from CloudKit so they don't reappear during future syncs.
+    pub async fn delete_cloud_chats(
+        &self,
+        chat_ids: Vec<String>,
+    ) -> Result<(), WrappedError> {
+        let cloud_messages = self.get_or_init_cloud_messages_client().await?;
+        cloud_messages.delete_chats(&chat_ids).await
+            .map_err(|e| WrappedError::GenericError { msg: format!("Failed to delete CloudKit chats: {}", e) })?;
+        Ok(())
     }
 
     pub async fn send_attachment(
