@@ -50,32 +50,6 @@ else
         DB_URI="file:$DATA_DIR/mautrix-imessage.db?_txlock=immediate"
     fi
 
-    # ── Contact source ────────────────────────────────────────────
-    echo ""
-    echo "Contact source (for resolving names in chats):"
-    echo "  1) iCloud (default — uses your Apple ID)"
-    echo "  2) External CardDAV (Google, Nextcloud, Fastmail, etc.)"
-    read -p "Choice [1]: " CONTACT_CHOICE
-    CONTACT_CHOICE="${CONTACT_CHOICE:-1}"
-
-    CARDDAV_EMAIL=""
-    CARDDAV_PASSWORD=""
-    CARDDAV_USERNAME=""
-    if [ "$CONTACT_CHOICE" = "2" ]; then
-        read -p "CardDAV email: " CARDDAV_EMAIL
-        if [ -z "$CARDDAV_EMAIL" ]; then
-            echo "ERROR: Email is required for CardDAV." >&2
-            exit 1
-        fi
-        read -p "CardDAV username (leave empty to use email): " CARDDAV_USERNAME
-        read -s -p "CardDAV app password: " CARDDAV_PASSWORD
-        echo ""
-        if [ -z "$CARDDAV_PASSWORD" ]; then
-            echo "ERROR: Password is required for CardDAV." >&2
-            exit 1
-        fi
-    fi
-
     echo ""
 
     # Generate example config, then patch in user values
@@ -113,37 +87,6 @@ text = '\n'.join(lines)
 open('$CONFIG', 'w').write(text)
 "
     echo "✓ Configured: $HS_ADDRESS, $HS_DOMAIN, $ADMIN_USER, $DB_TYPE"
-
-    # ── CardDAV setup (auto-discover URL + encrypt password) ──────
-    if [ -n "$CARDDAV_EMAIL" ]; then
-        CARDDAV_ARGS="--email $CARDDAV_EMAIL --password $CARDDAV_PASSWORD"
-        if [ -n "$CARDDAV_USERNAME" ]; then
-            CARDDAV_ARGS="$CARDDAV_ARGS --username $CARDDAV_USERNAME"
-        fi
-        CARDDAV_JSON=$("$BINARY" carddav-setup $CARDDAV_ARGS 2>/dev/null) || {
-            echo ""
-            echo "⚠  CardDAV setup failed. You can configure it manually in $CONFIG"
-            echo "   or re-run: $BINARY carddav-setup --email $CARDDAV_EMAIL --password <password>"
-            CARDDAV_JSON=""
-        }
-        if [ -n "$CARDDAV_JSON" ]; then
-            CARDDAV_URL=$(echo "$CARDDAV_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['url'])")
-            CARDDAV_ENC=$(echo "$CARDDAV_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['password_encrypted'])")
-            EFFECTIVE_USERNAME="${CARDDAV_USERNAME:-$CARDDAV_EMAIL}"
-            python3 -c "
-import re
-text = open('$CONFIG').read()
-def patch(text, key, val):
-    return re.sub(r'^(\s+' + re.escape(key) + r'\s*:)\s*.*$', r'\1 ' + val, text, count=1, flags=re.MULTILINE)
-text = patch(text, 'email', '\"$CARDDAV_EMAIL\"')
-text = patch(text, 'url', '\"$CARDDAV_URL\"')
-text = patch(text, 'username', '\"$EFFECTIVE_USERNAME\"')
-text = patch(text, 'password_encrypted', '\"$CARDDAV_ENC\"')
-open('$CONFIG', 'w').write(text)
-"
-            echo "✓ CardDAV configured: $CARDDAV_EMAIL → $CARDDAV_URL"
-        fi
-    fi
 fi
 
 # ── Generate registration ────────────────────────────────────
@@ -182,6 +125,132 @@ if [ -t 0 ] && { [ -z "$DB_PATH" ] || [ ! -f "$DB_PATH" ]; }; then
     [ -z "$BACKFILL_DAYS" ] && BACKFILL_DAYS="$CURRENT_DAYS"
     sed -i "s/initial_sync_days: .*/initial_sync_days: $BACKFILL_DAYS/" "$CONFIG"
     echo "✓ Backfill window set to $BACKFILL_DAYS days"
+fi
+
+# ── Contact source (runs every time, can reconfigure) ─────────
+if [ -t 0 ]; then
+    CURRENT_CARDDAV_EMAIL=$(grep 'email:' "$CONFIG" 2>/dev/null | head -1 | sed "s/.*email: *//;s/['\"]//g" | tr -d ' ' || true)
+    CONFIGURE_CARDDAV=false
+
+    if [ -n "$CURRENT_CARDDAV_EMAIL" ] && [ "$CURRENT_CARDDAV_EMAIL" != '""' ]; then
+        echo ""
+        echo "Contact source: External CardDAV ($CURRENT_CARDDAV_EMAIL)"
+        read -p "Change contact provider? [y/N]: " CHANGE_CONTACTS
+        case "$CHANGE_CONTACTS" in
+            [yY]*) CONFIGURE_CARDDAV=true ;;
+        esac
+    else
+        echo ""
+        echo "Contact source (for resolving names in chats):"
+        echo "  1) iCloud (default — uses your Apple ID)"
+        echo "  2) Google Contacts (requires app password)"
+        echo "  3) Fastmail"
+        echo "  4) Nextcloud"
+        echo "  5) Other CardDAV server"
+        read -p "Choice [1]: " CONTACT_CHOICE
+        CONTACT_CHOICE="${CONTACT_CHOICE:-1}"
+        if [ "$CONTACT_CHOICE" != "1" ]; then
+            CONFIGURE_CARDDAV=true
+        fi
+    fi
+
+    if [ "$CONFIGURE_CARDDAV" = true ]; then
+        # Show menu if we're changing from an existing provider
+        if [ -n "$CURRENT_CARDDAV_EMAIL" ] && [ "$CURRENT_CARDDAV_EMAIL" != '""' ]; then
+            echo ""
+            echo "  1) iCloud (remove external CardDAV)"
+            echo "  2) Google Contacts (requires app password)"
+            echo "  3) Fastmail"
+            echo "  4) Nextcloud"
+            echo "  5) Other CardDAV server"
+            read -p "Choice: " CONTACT_CHOICE
+        fi
+
+        CARDDAV_EMAIL=""
+        CARDDAV_PASSWORD=""
+        CARDDAV_USERNAME=""
+        CARDDAV_URL=""
+
+        if [ "${CONTACT_CHOICE:-}" = "1" ]; then
+            # Remove external CardDAV — clear the config fields
+            python3 -c "
+import re
+text = open('$CONFIG').read()
+def patch(text, key, val):
+    return re.sub(r'^(\s+' + re.escape(key) + r'\s*:)\s*.*$', r'\1 ' + val, text, count=1, flags=re.MULTILINE)
+text = patch(text, 'email', '\"\"')
+text = patch(text, 'url', '\"\"')
+text = patch(text, 'username', '\"\"')
+text = patch(text, 'password_encrypted', '\"\"')
+open('$CONFIG', 'w').write(text)
+"
+            echo "✓ Switched to iCloud contacts"
+        elif [ -n "${CONTACT_CHOICE:-}" ]; then
+            read -p "Email address: " CARDDAV_EMAIL
+            if [ -z "$CARDDAV_EMAIL" ]; then
+                echo "ERROR: Email is required." >&2
+                exit 1
+            fi
+
+            case "$CONTACT_CHOICE" in
+                2)
+                    CARDDAV_URL="https://www.googleapis.com/carddav/v1/principals/$CARDDAV_EMAIL/lists/default/"
+                    echo "  Note: Use a Google App Password (https://myaccount.google.com/apppasswords)"
+                    ;;
+                3)
+                    CARDDAV_URL="https://carddav.fastmail.com/dav/addressbooks/user/$CARDDAV_EMAIL/Default/"
+                    echo "  Note: Use a Fastmail App Password (Settings → Privacy & Security → App Passwords)"
+                    ;;
+                4)
+                    read -p "Nextcloud server URL (e.g. https://cloud.example.com): " NC_SERVER
+                    NC_SERVER="${NC_SERVER%/}"
+                    CARDDAV_URL="$NC_SERVER/remote.php/dav"
+                    ;;
+                5)
+                    read -p "CardDAV server URL: " CARDDAV_URL
+                    if [ -z "$CARDDAV_URL" ]; then
+                        echo "ERROR: URL is required." >&2
+                        exit 1
+                    fi
+                    ;;
+            esac
+
+            read -p "Username (leave empty to use email): " CARDDAV_USERNAME
+            read -s -p "App password: " CARDDAV_PASSWORD
+            echo ""
+            if [ -z "$CARDDAV_PASSWORD" ]; then
+                echo "ERROR: Password is required." >&2
+                exit 1
+            fi
+
+            # Encrypt password and patch config
+            CARDDAV_ARGS="--email $CARDDAV_EMAIL --password $CARDDAV_PASSWORD --url $CARDDAV_URL"
+            if [ -n "$CARDDAV_USERNAME" ]; then
+                CARDDAV_ARGS="$CARDDAV_ARGS --username $CARDDAV_USERNAME"
+            fi
+            CARDDAV_JSON=$("$BINARY" carddav-setup $CARDDAV_ARGS 2>/dev/null) || CARDDAV_JSON=""
+
+            if [ -z "$CARDDAV_JSON" ]; then
+                echo "⚠  CardDAV setup failed. You can configure it manually in $CONFIG"
+            else
+                CARDDAV_RESOLVED_URL=$(echo "$CARDDAV_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['url'])")
+                CARDDAV_ENC=$(echo "$CARDDAV_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['password_encrypted'])")
+                EFFECTIVE_USERNAME="${CARDDAV_USERNAME:-$CARDDAV_EMAIL}"
+                python3 -c "
+import re
+text = open('$CONFIG').read()
+def patch(text, key, val):
+    return re.sub(r'^(\s+' + re.escape(key) + r'\s*:)\s*.*$', r'\1 ' + val, text, count=1, flags=re.MULTILINE)
+text = patch(text, 'email', '\"$CARDDAV_EMAIL\"')
+text = patch(text, 'url', '\"$CARDDAV_RESOLVED_URL\"')
+text = patch(text, 'username', '\"$EFFECTIVE_USERNAME\"')
+text = patch(text, 'password_encrypted', '\"$CARDDAV_ENC\"')
+open('$CONFIG', 'w').write(text)
+"
+                echo "✓ CardDAV configured: $CARDDAV_EMAIL → $CARDDAV_RESOLVED_URL"
+            fi
+        fi
+    fi
 fi
 
 # ── Check for existing login / prompt if needed ──────────────
