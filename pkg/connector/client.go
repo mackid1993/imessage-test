@@ -1362,14 +1362,26 @@ func (c *IMClient) HandleMatrixDeleteChat(ctx context.Context, msg *bridgev2.Mat
 	}
 
 	// Delete from CloudKit so the chat doesn't reappear during future syncs.
-	// CloudKit uses record_name (the record key), not chat_identifier.
+	// Must delete BOTH the chat record AND all message records — portals are
+	// created from messages (listPortalIDsWithNewestTimestamp), not chats.
 	if c.cloudStore != nil {
+		// Delete chat record.
 		recordName, err := c.cloudStore.getCloudRecordNameByPortalID(ctx, portalID)
 		if err == nil && recordName != "" {
 			if err := c.client.DeleteCloudChats([]string{recordName}); err != nil {
 				log.Warn().Err(err).Str("record_name", recordName).Msg("Failed to delete chat from CloudKit")
 			} else {
-				log.Info().Str("record_name", recordName).Msg("Deleted chat from CloudKit")
+				log.Info().Str("record_name", recordName).Msg("Deleted chat record from CloudKit")
+			}
+		}
+
+		// Delete all message records for this portal.
+		msgRecordNames, err := c.cloudStore.getMessageRecordNamesByPortalID(ctx, portalID)
+		if err == nil && len(msgRecordNames) > 0 {
+			if err := c.client.DeleteCloudMessages(msgRecordNames); err != nil {
+				log.Warn().Err(err).Int("count", len(msgRecordNames)).Msg("Failed to delete messages from CloudKit")
+			} else {
+				log.Info().Int("count", len(msgRecordNames)).Msg("Deleted message records from CloudKit")
 			}
 		}
 	}

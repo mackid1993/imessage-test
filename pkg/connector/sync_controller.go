@@ -730,6 +730,7 @@ func (c *IMClient) ingestCloudMessages(
 
 		batch = append(batch, cloudMessageRow{
 			GUID:              msg.Guid,
+			RecordName:        msg.RecordName,
 			CloudChatID:       msg.CloudChatId,
 			PortalID:          portalID,
 			TimestampMS:       timestampMS,

@@ -19,6 +19,7 @@ type cloudBackfillStore struct {
 
 type cloudMessageRow struct {
 	GUID        string
+	RecordName  string
 	CloudChatID string
 	PortalID    string
 	TimestampMS int64
@@ -153,6 +154,15 @@ func (s *cloudBackfillStore) ensureSchema(ctx context.Context) error {
 			if _, err := s.db.Exec(ctx, fmt.Sprintf(`ALTER TABLE cloud_message ADD COLUMN %s %s`, col.name, col.def)); err != nil {
 				return fmt.Errorf("failed to add %s column: %w", col.name, err)
 			}
+		}
+	}
+
+	// Migration: add record_name column to cloud_message if missing
+	var hasMsgRecordName int
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM pragma_table_info('cloud_message') WHERE name='record_name'`).Scan(&hasMsgRecordName)
+	if hasMsgRecordName == 0 {
+		if _, err := s.db.Exec(ctx, `ALTER TABLE cloud_message ADD COLUMN record_name TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("failed to add record_name column to cloud_message: %w", err)
 		}
 	}
 
@@ -293,13 +303,14 @@ func (s *cloudBackfillStore) upsertMessageBatch(ctx context.Context, rows []clou
 
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO cloud_message (
-			login_id, guid, chat_id, portal_id, timestamp_ms,
+			login_id, guid, record_name, chat_id, portal_id, timestamp_ms,
 			sender, is_from_me, text, subject, service, deleted,
 			tapback_type, tapback_target_guid, tapback_emoji,
 			attachments_json,
 			created_ts, updated_ts
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (login_id, guid) DO UPDATE SET
+			record_name=excluded.record_name,
 			chat_id=excluded.chat_id,
 			portal_id=excluded.portal_id,
 			timestamp_ms=excluded.timestamp_ms,
@@ -323,7 +334,7 @@ func (s *cloudBackfillStore) upsertMessageBatch(ctx context.Context, rows []clou
 	nowMS := time.Now().UnixMilli()
 	for _, row := range rows {
 		_, err = stmt.ExecContext(ctx,
-			s.loginID, row.GUID, row.CloudChatID, row.PortalID, row.TimestampMS,
+			s.loginID, row.GUID, row.RecordName, row.CloudChatID, row.PortalID, row.TimestampMS,
 			row.Sender, row.IsFromMe, row.Text, row.Subject, row.Service, row.Deleted,
 			row.TapbackType, row.TapbackTargetGUID, row.TapbackEmoji,
 			row.AttachmentsJSON,
@@ -632,6 +643,30 @@ func (s *cloudBackfillStore) getCloudRecordNameByPortalID(ctx context.Context, p
 	return recordName, nil
 }
 
+// getMessageRecordNamesByPortalID returns all CloudKit record_names for messages
+// belonging to a portal. Used when deleting a chat to also delete its messages
+// from CloudKit so they don't reappear during future syncs.
+func (s *cloudBackfillStore) getMessageRecordNamesByPortalID(ctx context.Context, portalID string) ([]string, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT record_name FROM cloud_message WHERE login_id=$1 AND portal_id=$2 AND record_name <> ''`,
+		s.loginID, portalID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var names []string
+	for rows.Next() {
+		var name string
+		if err = rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, rows.Err()
+}
+
 func (s *cloudBackfillStore) hasMessage(ctx context.Context, guid string) (bool, error) {
 	var count int
 	err := s.db.QueryRow(ctx,
@@ -661,13 +696,14 @@ func (s *cloudBackfillStore) upsertMessage(ctx context.Context, row cloudMessage
 	nowMS := time.Now().UnixMilli()
 	_, err := s.db.Exec(ctx, `
 		INSERT INTO cloud_message (
-			login_id, guid, chat_id, portal_id, timestamp_ms,
+			login_id, guid, record_name, chat_id, portal_id, timestamp_ms,
 			sender, is_from_me, text, subject, service, deleted,
 			tapback_type, tapback_target_guid, tapback_emoji,
 			attachments_json,
 			created_ts, updated_ts
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 		ON CONFLICT (login_id, guid) DO UPDATE SET
+			record_name=excluded.record_name,
 			chat_id=excluded.chat_id,
 			portal_id=excluded.portal_id,
 			timestamp_ms=excluded.timestamp_ms,
@@ -683,7 +719,7 @@ func (s *cloudBackfillStore) upsertMessage(ctx context.Context, row cloudMessage
 			attachments_json=excluded.attachments_json,
 			updated_ts=excluded.updated_ts
 	`,
-		s.loginID, row.GUID, row.CloudChatID, row.PortalID, row.TimestampMS,
+		s.loginID, row.GUID, row.RecordName, row.CloudChatID, row.PortalID, row.TimestampMS,
 		row.Sender, row.IsFromMe, row.Text, row.Subject, row.Service, row.Deleted,
 		row.TapbackType, row.TapbackTargetGUID, row.TapbackEmoji,
 		row.AttachmentsJSON,
