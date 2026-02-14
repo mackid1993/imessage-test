@@ -129,6 +129,37 @@ fi
 
 # (initial_sync_days is unused — cloud sync fetches all available history)
 
+# ── Restore CardDAV config from backup ────────────────────────
+CARDDAV_BACKUP="$DATA_DIR/.carddav-config"
+if [ -f "$CARDDAV_BACKUP" ]; then
+    CHECK_EMAIL=$(grep 'email:' "$CONFIG" 2>/dev/null | head -1 | sed "s/.*email: *//;s/['\"]//g" | tr -d ' ' || true)
+    if [ -z "$CHECK_EMAIL" ]; then
+        source "$CARDDAV_BACKUP"
+        if [ -n "${SAVED_CARDDAV_EMAIL:-}" ] && [ -n "${SAVED_CARDDAV_ENC:-}" ]; then
+            python3 -c "
+import re
+text = open('$CONFIG').read()
+if 'carddav:' not in text:
+    text += '''
+    carddav:
+        email: \"\"
+        url: \"\"
+        username: \"\"
+        password_encrypted: \"\"
+'''
+def patch(text, key, val):
+    return re.sub(r'^(\s+' + re.escape(key) + r'\s*:)\s*.*$', r'\1 ' + val, text, count=1, flags=re.MULTILINE)
+text = patch(text, 'email', '\"$SAVED_CARDDAV_EMAIL\"')
+text = patch(text, 'url', '\"$SAVED_CARDDAV_URL\"')
+text = patch(text, 'username', '\"$SAVED_CARDDAV_USERNAME\"')
+text = patch(text, 'password_encrypted', '\"$SAVED_CARDDAV_ENC\"')
+open('$CONFIG', 'w').write(text)
+"
+            echo "✓ Restored CardDAV config: $SAVED_CARDDAV_EMAIL"
+        fi
+    fi
+fi
+
 # ── Contact source (runs every time, can reconfigure) ─────────
 if [ -t 0 ]; then
     CURRENT_CARDDAV_EMAIL=$(grep 'email:' "$CONFIG" 2>/dev/null | head -1 | sed "s/.*email: *//;s/['\"]//g" | tr -d ' ' || true)
@@ -186,6 +217,7 @@ text = patch(text, 'username', '\"\"')
 text = patch(text, 'password_encrypted', '\"\"')
 open('$CONFIG', 'w').write(text)
 "
+            rm -f "$CARDDAV_BACKUP"
             echo "✓ Switched to iCloud contacts"
         elif [ -n "${CONTACT_CHOICE:-}" ]; then
             read -p "Email address: " CARDDAV_EMAIL
@@ -258,6 +290,12 @@ text = patch(text, 'password_encrypted', '\"$CARDDAV_ENC\"')
 open('$CONFIG', 'w').write(text)
 "
                 echo "✓ CardDAV configured: $CARDDAV_EMAIL → $CARDDAV_RESOLVED_URL"
+                cat > "$CARDDAV_BACKUP" << BKEOF
+SAVED_CARDDAV_EMAIL="$CARDDAV_EMAIL"
+SAVED_CARDDAV_URL="$CARDDAV_RESOLVED_URL"
+SAVED_CARDDAV_USERNAME="$EFFECTIVE_USERNAME"
+SAVED_CARDDAV_ENC="$CARDDAV_ENC"
+BKEOF
             fi
         fi
     fi
