@@ -767,6 +767,17 @@ func (c *IMClient) resolvePortalIDForCloudChat(participants []string, displayNam
 		if normalized == "" {
 			continue
 		}
+		// Reject participants that don't resolve to a known identifier format.
+		// Tombstone records in CloudKit sometimes have the chat ID itself
+		// (e.g. "chat2487933483718658130") as a participant, which passes
+		// through normalizeIdentifierForPortalID unchanged. Filter those out.
+		if !strings.HasPrefix(normalized, "tel:") && !strings.HasPrefix(normalized, "mailto:") && !strings.HasPrefix(normalized, "urn:biz:") {
+			c.UserLogin.Log.Debug().
+				Str("participant", participant).
+				Str("normalized", normalized).
+				Msg("Skipping cloud chat participant with unrecognized identifier format")
+			continue
+		}
 		normalizedParticipants = append(normalizedParticipants, normalized)
 	}
 	if len(normalizedParticipants) == 0 {
@@ -823,29 +834,8 @@ func (c *IMClient) createPortalsFromCloudSync(ctx context.Context, log zerolog.L
 		return
 	}
 
-	// Also get portals that exist in cloud_chat but have zero messages.
-	// These still need rooms but won't have any forward backfill to do.
-	allPortalIDs, err := c.cloudStore.listAllPortalIDs(ctx)
-	if err != nil {
-		log.Err(err).Msg("Failed to list all cloud chat portal IDs")
+	if len(portalInfos) == 0 {
 		return
-	}
-	if len(allPortalIDs) == 0 && len(portalInfos) == 0 {
-		return
-	}
-
-	// Build set of portals that have messages (already in portalInfos).
-	hasMessages := make(map[string]bool, len(portalInfos))
-	for _, p := range portalInfos {
-		hasMessages[p.PortalID] = true
-	}
-
-	// Portals with no messages — create room but skip all backfill.
-	var noMessagePortals []string
-	for _, pid := range allPortalIDs {
-		if !hasMessages[pid] {
-			noMessagePortals = append(noMessagePortals, pid)
-		}
 	}
 
 	// Split portals with messages into priority (recent) vs deferred (old).
@@ -867,36 +857,31 @@ func (c *IMClient) createPortalsFromCloudSync(ctx context.Context, log zerolog.L
 	}
 
 	// Register the skip-set so FetchMessages returns 0 messages for
-	// deferred + no-message portals during forward backfill.
-	skipSet := make(map[string]bool, len(deferredPortals)+len(noMessagePortals))
+	// deferred portals during forward backfill.
+	skipSet := make(map[string]bool, len(deferredPortals))
 	for _, pid := range deferredPortals {
-		skipSet[pid] = true
-	}
-	for _, pid := range noMessagePortals {
 		skipSet[pid] = true
 	}
 	c.initialSyncSkipMu.Lock()
 	c.initialSyncSkipForwardBackfill = skipSet
 	c.initialSyncSkipMu.Unlock()
 
-	totalPortals := len(priorityPortals) + len(deferredPortals) + len(noMessagePortals)
+	totalPortals := len(priorityPortals) + len(deferredPortals)
 	portalStart := time.Now()
 	log.Info().
 		Int("total", totalPortals).
 		Int("priority", len(priorityPortals)).
 		Int("deferred", len(deferredPortals)).
-		Int("no_messages", len(noMessagePortals)).
 		Int("cutoff_days", priorityCutoffDays).
 		Msg("Creating portals from cloud sync — priority portals get forward backfill first, deferred portals use backward backfill queue")
 
 	// Queue events: priority portals first (most recent activity first within
-	// that group), then deferred, then no-message portals.
+	// that group), then deferred.
 	// portalInfos is already sorted by newest_ts DESC, so priorityPortals
 	// and deferredPortals preserve that order.
 	ordered := make([]string, 0, totalPortals)
 	ordered = append(ordered, priorityPortals...)
 	ordered = append(ordered, deferredPortals...)
-	ordered = append(ordered, noMessagePortals...)
 
 	created := 0
 	for i, portalID := range ordered {
@@ -944,7 +929,6 @@ func (c *IMClient) createPortalsFromCloudSync(ctx context.Context, log zerolog.L
 		Int("total", totalPortals).
 		Int("priority_forward_backfill", len(priorityPortals)).
 		Int("deferred_backward_only", len(deferredPortals)).
-		Int("no_messages_skipped", len(noMessagePortals)).
 		Dur("elapsed", time.Since(portalStart)).
 		Msg("Finished queuing portals from cloud sync")
 }
