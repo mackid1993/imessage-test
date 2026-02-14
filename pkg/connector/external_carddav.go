@@ -394,11 +394,63 @@ func parseVCardMultistatusStandalone(data []byte, log zerolog.Logger) []*imessag
 }
 
 // ============================================================================
-// CardDAV Auto-Discovery (RFC 6764)
+// CardDAV Auto-Discovery (RFC 6764) + Known Providers
 // ============================================================================
 
+// KnownCardDAVProvider maps a provider name to its URL pattern.
+// {email} is replaced with the user's email address.
+type KnownCardDAVProvider struct {
+	Name    string
+	Domains []string // email domains that match this provider
+	URL     string   // URL pattern ({email} replaced)
+}
+
+// KnownProviders lists well-known CardDAV providers with their URL patterns.
+var KnownProviders = []KnownCardDAVProvider{
+	{
+		Name:    "Google",
+		Domains: []string{"gmail.com", "googlemail.com"},
+		URL:     "https://www.googleapis.com/carddav/v1/principals/{email}/lists/default/",
+	},
+	{
+		Name:    "Fastmail",
+		Domains: []string{"fastmail.com", "fastmail.fm", "messagingengine.com"},
+		URL:     "https://carddav.fastmail.com/dav/addressbooks/user/{email}/Default/",
+	},
+	{
+		Name:    "iCloud",
+		Domains: []string{"icloud.com", "me.com", "mac.com"},
+		URL:     "https://contacts.icloud.com",
+	},
+	{
+		Name:    "Yahoo",
+		Domains: []string{"yahoo.com", "yahoo.co.uk", "ymail.com"},
+		URL:     "https://carddav.address.yahoo.com/dav/{email}/",
+	},
+}
+
+// ResolveProviderURL returns the CardDAV URL for a known provider, or empty string.
+func ResolveProviderURL(email string) string {
+	parts := strings.SplitN(email, "@", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+	domain := strings.ToLower(parts[1])
+
+	for _, p := range KnownProviders {
+		for _, d := range p.Domains {
+			if domain == d {
+				return strings.ReplaceAll(p.URL, "{email}", email)
+			}
+		}
+	}
+	// Google Workspace: any domain could be Google-hosted
+	// but we can't detect that — return empty, let auto-discovery try
+	return ""
+}
+
 // DiscoverCardDAVURL attempts to find the CardDAV server URL for an email address.
-// Tries in order: .well-known/carddav, DNS SRV records.
+// Tries in order: known providers, .well-known/carddav (GET + PROPFIND), DNS SRV.
 func DiscoverCardDAVURL(email, username, password string, log zerolog.Logger) (string, error) {
 	parts := strings.SplitN(email, "@", 2)
 	if len(parts) != 2 {
@@ -406,7 +458,13 @@ func DiscoverCardDAVURL(email, username, password string, log zerolog.Logger) (s
 	}
 	domain := parts[1]
 
-	// Try .well-known/carddav first (most common)
+	// Try known providers first
+	if url := ResolveProviderURL(email); url != "" {
+		log.Info().Str("url", url).Msg("CardDAV URL resolved from known provider")
+		return url, nil
+	}
+
+	// Try .well-known/carddav (HTTPS)
 	wellKnownURL := fmt.Sprintf("https://%s/.well-known/carddav", domain)
 	if url, err := tryWellKnown(wellKnownURL, username, password, log); err == nil {
 		return url, nil
@@ -418,69 +476,75 @@ func DiscoverCardDAVURL(email, username, password string, log zerolog.Logger) (s
 		return url, nil
 	}
 
-	// Try DNS SRV records (_carddavs._tcp for TLS, _carddav._tcp for plain)
+	// Try DNS SRV records
 	if url, err := trySRVDiscovery(domain, log); err == nil {
 		return url, nil
 	}
 
-	// Special case: Google CardDAV (doesn't support .well-known)
-	if domain == "gmail.com" || domain == "googlemail.com" || strings.HasSuffix(domain, ".google.com") {
-		return fmt.Sprintf("https://www.googleapis.com/carddav/v1/principals/%s/lists/default/", email), nil
-	}
-
-	return "", fmt.Errorf("CardDAV auto-discovery failed for %s (tried .well-known and SRV)", domain)
+	return "", fmt.Errorf("CardDAV auto-discovery failed for %s (tried known providers, .well-known, and SRV)", domain)
 }
 
 // tryWellKnown attempts CardDAV discovery via .well-known/carddav.
-// Follows redirects to find the actual CardDAV URL.
+// Tries GET first (most servers redirect), then PROPFIND.
 func tryWellKnown(wellKnownURL, username, password string, log zerolog.Logger) (string, error) {
 	client := &http.Client{
 		Timeout: 10 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			// Stop following redirects — we want the Location header
 			return http.ErrUseLastResponse
 		},
 	}
 
-	req, err := http.NewRequest("PROPFIND", wellKnownURL, nil)
-	if err != nil {
-		return "", err
-	}
-	req.SetBasicAuth(username, password)
-	req.Header.Set("Depth", "0")
-	req.Header.Set("Content-Type", "application/xml; charset=utf-8")
+	// Try GET first — most servers return a redirect
+	for _, method := range []string{"GET", "PROPFIND"} {
+		req, err := http.NewRequest(method, wellKnownURL, nil)
+		if err != nil {
+			continue
+		}
+		req.SetBasicAuth(username, password)
+		if method == "PROPFIND" {
+			req.Header.Set("Depth", "0")
+			req.Header.Set("Content-Type", "application/xml; charset=utf-8")
+		}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Debug().Err(err).Str("method", method).Str("url", wellKnownURL).Msg("CardDAV .well-known request failed")
+			continue
+		}
+		resp.Body.Close()
 
-	// 3xx redirect: follow the Location header
-	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		location := resp.Header.Get("Location")
-		if location != "" {
-			log.Debug().Str("location", location).Msg("CardDAV .well-known redirected")
-			// Resolve relative redirect
-			if strings.HasPrefix(location, "/") {
-				// Extract scheme+host from the original URL
-				if idx := strings.Index(wellKnownURL, "://"); idx >= 0 {
-					rest := wellKnownURL[idx+3:]
-					if slashIdx := strings.Index(rest, "/"); slashIdx >= 0 {
-						location = wellKnownURL[:idx+3+slashIdx] + location
-					}
-				}
+		// 3xx redirect: follow the Location header
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			location := resp.Header.Get("Location")
+			if location != "" {
+				log.Debug().Str("location", location).Str("method", method).Msg("CardDAV .well-known redirected")
+				return resolveRedirect(wellKnownURL, location), nil
 			}
-			return location, nil
+		}
+
+		// 207 Multi-Status: the URL itself is the CardDAV endpoint
+		if resp.StatusCode == 207 {
+			return wellKnownURL, nil
 		}
 	}
 
-	// 207 Multi-Status: the .well-known URL itself is the CardDAV endpoint
-	if resp.StatusCode == 207 {
-		return wellKnownURL, nil
-	}
+	return "", fmt.Errorf(".well-known not available at %s", wellKnownURL)
+}
 
-	return "", fmt.Errorf(".well-known returned %d", resp.StatusCode)
+// resolveRedirect resolves a potentially relative redirect Location.
+func resolveRedirect(baseURL, location string) string {
+	if strings.HasPrefix(location, "http://") || strings.HasPrefix(location, "https://") {
+		return location
+	}
+	if strings.HasPrefix(location, "/") {
+		if idx := strings.Index(baseURL, "://"); idx >= 0 {
+			rest := baseURL[idx+3:]
+			if slashIdx := strings.Index(rest, "/"); slashIdx >= 0 {
+				return baseURL[:idx+3+slashIdx] + location
+			}
+		}
+	}
+	return location
 }
 
 // trySRVDiscovery looks up _carddavs._tcp and _carddav._tcp SRV records.
