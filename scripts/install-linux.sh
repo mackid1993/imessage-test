@@ -323,6 +323,7 @@ if [ "$NEEDS_LOGIN" = "false" ]; then
 fi
 
 # ── Restore preferred_handle from DB or session backup ────────
+HANDLE_BACKUP="$DATA_DIR/.preferred-handle"
 if [ "$NEEDS_LOGIN" = "false" ]; then
     CURRENT_HANDLE=$(grep 'preferred_handle:' "$CONFIG" 2>/dev/null | head -1 | sed "s/.*preferred_handle: *//;s/['\"]//g" || true)
     if [ -z "$CURRENT_HANDLE" ]; then
@@ -338,10 +339,18 @@ if [ "$NEEDS_LOGIN" = "false" ]; then
                 SAVED_HANDLE=$(python3 -c "import json; print(json.load(open('$SESSION_FILE')).get('preferred_handle',''))" 2>/dev/null || true)
             fi
         fi
+        # Fall back to backup file from previous install
+        if [ -z "$SAVED_HANDLE" ] && [ -f "$HANDLE_BACKUP" ]; then
+            SAVED_HANDLE=$(cat "$HANDLE_BACKUP")
+        fi
         if [ -n "$SAVED_HANDLE" ]; then
             sed -i "s|preferred_handle: .*|preferred_handle: '$SAVED_HANDLE'|" "$CONFIG"
             echo "✓ Restored preferred handle: $SAVED_HANDLE"
+            echo "$SAVED_HANDLE" > "$HANDLE_BACKUP"
         fi
+    else
+        # Save current handle for future resets
+        echo "$CURRENT_HANDLE" > "$HANDLE_BACKUP"
     fi
 fi
 
