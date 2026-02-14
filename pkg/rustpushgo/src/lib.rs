@@ -2501,6 +2501,17 @@ impl Client {
         Ok(())
     }
 
+    /// Delete message records from CloudKit so they don't reappear during future syncs.
+    pub async fn delete_cloud_messages(
+        &self,
+        message_ids: Vec<String>,
+    ) -> Result<(), WrappedError> {
+        let cloud_messages = self.get_or_init_cloud_messages_client().await?;
+        cloud_messages.delete_messages(&message_ids).await
+            .map_err(|e| WrappedError::GenericError { msg: format!("Failed to delete CloudKit messages: {}", e) })?;
+        Ok(())
+    }
+
     pub async fn send_attachment(
         &self,
         conversation: WrappedConversation,
