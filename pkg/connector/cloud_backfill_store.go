@@ -617,19 +617,19 @@ func (s *cloudBackfillStore) getChatParticipantsByPortalID(ctx context.Context, 
 	return normalized, nil
 }
 
-func (s *cloudBackfillStore) getCloudChatIDByPortalID(ctx context.Context, portalID string) (string, error) {
-	var cloudChatID string
+func (s *cloudBackfillStore) getCloudRecordNameByPortalID(ctx context.Context, portalID string) (string, error) {
+	var recordName string
 	err := s.db.QueryRow(ctx,
-		`SELECT cloud_chat_id FROM cloud_chat WHERE login_id=$1 AND portal_id=$2 LIMIT 1`,
+		`SELECT record_name FROM cloud_chat WHERE login_id=$1 AND portal_id=$2 AND record_name <> '' LIMIT 1`,
 		s.loginID, portalID,
-	).Scan(&cloudChatID)
+	).Scan(&recordName)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return "", nil
 		}
 		return "", err
 	}
-	return cloudChatID, nil
+	return recordName, nil
 }
 
 func (s *cloudBackfillStore) hasMessage(ctx context.Context, guid string) (bool, error) {
