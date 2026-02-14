@@ -125,13 +125,19 @@ if [ -f "$CARDDAV_BACKUP" ]; then
 import re
 text = open('$CONFIG').read()
 if 'carddav:' not in text:
-    text += '''
-    carddav:
-        email: \"\"
-        url: \"\"
-        username: \"\"
-        password_encrypted: \"\"
-'''
+    lines = text.split('\\n')
+    insert_at = len(lines)
+    in_network = False
+    for i, line in enumerate(lines):
+        if line.startswith('network:'):
+            in_network = True
+            continue
+        if in_network and line and not line[0].isspace() and not line.startswith('#'):
+            insert_at = i
+            break
+    carddav = ['    carddav:', '        email: \"\"', '        url: \"\"', '        username: \"\"', '        password_encrypted: \"\"']
+    lines = lines[:insert_at] + carddav + lines[insert_at:]
+    text = '\\n'.join(lines)
 def patch(text, key, val):
     return re.sub(r'^(\s+' + re.escape(key) + r'\s*:)\s*.*$', r'\1 ' + val, text, count=1, flags=re.MULTILINE)
 text = patch(text, 'email', '\"$SAVED_CARDDAV_EMAIL\"')
@@ -259,13 +265,19 @@ open('$CONFIG', 'w').write(text)
 import re
 text = open('$CONFIG').read()
 if 'carddav:' not in text:
-    text += '''
-    carddav:
-        email: \"\"
-        url: \"\"
-        username: \"\"
-        password_encrypted: \"\"
-'''
+    lines = text.split('\\n')
+    insert_at = len(lines)
+    in_network = False
+    for i, line in enumerate(lines):
+        if line.startswith('network:'):
+            in_network = True
+            continue
+        if in_network and line and not line[0].isspace() and not line.startswith('#'):
+            insert_at = i
+            break
+    carddav = ['    carddav:', '        email: \"\"', '        url: \"\"', '        username: \"\"', '        password_encrypted: \"\"']
+    lines = lines[:insert_at] + carddav + lines[insert_at:]
+    text = '\\n'.join(lines)
 def patch(text, key, val):
     return re.sub(r'^(\s+' + re.escape(key) + r'\s*:)\s*.*$', r'\1 ' + val, text, count=1, flags=re.MULTILINE)
 text = patch(text, 'email', '\"$CARDDAV_EMAIL\"')
