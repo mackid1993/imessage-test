@@ -617,6 +617,21 @@ func (s *cloudBackfillStore) getChatParticipantsByPortalID(ctx context.Context, 
 	return normalized, nil
 }
 
+func (s *cloudBackfillStore) getCloudChatIDByPortalID(ctx context.Context, portalID string) (string, error) {
+	var cloudChatID string
+	err := s.db.QueryRow(ctx,
+		`SELECT cloud_chat_id FROM cloud_chat WHERE login_id=$1 AND portal_id=$2 LIMIT 1`,
+		s.loginID, portalID,
+	).Scan(&cloudChatID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", nil
+		}
+		return "", err
+	}
+	return cloudChatID, nil
+}
+
 func (s *cloudBackfillStore) hasMessage(ctx context.Context, guid string) (bool, error) {
 	var count int
 	err := s.db.QueryRow(ctx,
